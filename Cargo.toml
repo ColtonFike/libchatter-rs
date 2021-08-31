@@ -37,4 +37,7 @@ members = [
     "examples/artemis/client",
     # Dummy consensus module
     "consensus/dummy",
+    # Colton Benchmark
+    "consensus/benchmark",
+    "examples/benchmark/node",
 ]
