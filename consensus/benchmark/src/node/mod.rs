@@ -8,3 +8,6 @@ pub use reactor::*;
 // why does this have to be pub, but others not?
 pub mod message;
 pub use message::*;
+
+mod comms;
+pub use comms::*;

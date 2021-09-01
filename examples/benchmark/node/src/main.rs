@@ -89,11 +89,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     log::info!("Using special apollo client: {}", is_client_apollo_enabled);
     // Start the Apollo consensus protocol
-    core_rt.block_on(benchmark::node::reactor(
-        &config,
-        is_client_apollo_enabled,
-        net_send,
-        net_recv,
-    ));
+    core_rt.block_on(benchmark::node::reactor(&config, net_send, net_recv));
     Ok(())
 }

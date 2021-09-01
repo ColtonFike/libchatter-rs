@@ -3,7 +3,7 @@ use types::WireReady;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProtocolMsg {
-    payload: Vec<u8>,
+    pub payload: Vec<u8>,
 }
 
 impl WireReady for ProtocolMsg {
