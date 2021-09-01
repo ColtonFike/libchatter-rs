@@ -1,7 +1,6 @@
 // use futures::prelude::*;
 use clap::{load_yaml, App};
 use config::Node;
-use consensus::benchmark::ProtocolMsg;
 use std::error::Error;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -65,13 +64,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap();
 
     // Setup networking
-    let protocol_network = net::futures_manager::Protocol::<ProtocolMsg, ProtocolMsg>::new(
-        config.id,
-        config.num_nodes,
-        config.root_cert.clone(),
-        config.my_cert.clone(),
-        config.my_cert_key.clone(),
-    );
+    let protocol_network =
+        // why can't I just import ProtocolMsg?
+        net::futures_manager::Protocol::<benchmark::node::message::ProtocolMsg, benchmark::node::message::ProtocolMsg>::new(
+            config.id,
+            config.num_nodes,
+            config.root_cert.clone(),
+            config.my_cert.clone(),
+            config.my_cert_key.clone(),
+        );
 
     // Setup the protocol network
     let (net_send, net_recv) = prot_net_rt.block_on(protocol_network.server_setup(

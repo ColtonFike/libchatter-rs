@@ -5,5 +5,6 @@ pub use context::*;
 mod reactor;
 pub use reactor::*;
 
-mod message;
+// why does this have to be pub, but others not?
+pub mod message;
 pub use message::*;

@@ -1,4 +1,4 @@
-//use super::{context::Context, message::*, proposal::*};
+use super::{context::Context, message::*};
 use config::Node;
 /// The core consensus module used for Apollo
 ///
@@ -6,15 +6,17 @@ use config::Node;
 /// clients accordingly.
 use futures::channel::mpsc::{unbounded as unbounded_channel, UnboundedReceiver, UnboundedSender};
 use futures::StreamExt;
+use std::sync::Arc;
+use types::Replica;
 
 pub async fn reactor(
     config:&Node,
     is_client_apollo_enabled: bool,
-    net_send: UnboundedSender<(&[u8], &[u8])>,
-    mut net_recv: UnboundedReceiver<(&[u8], &[u8])>,
+    net_send: UnboundedSender<(Replica, Arc<ProtocolMsg>)>,
+    mut net_recv: UnboundedReceiver<(Replica, ProtocolMsg)>,
 ) {
     // Optimization to improve latency when the payloads are high
-    //let (send, mut recv) = unbounded_channel();
+    // let (send, mut recv) = unbounded_channel();
 
     let block_size = config.block_size;
     let myid = config.id;
