@@ -12,7 +12,7 @@ do
       --config $TESTDIR/nodes-$i.json \
       --ip ip_file \
       --sleep 20 \
-      -s $1 &> 0.log &
+      -s $1 &> $i.log &
 done
 
 sleep 60

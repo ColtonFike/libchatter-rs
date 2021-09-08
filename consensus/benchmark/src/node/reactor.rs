@@ -47,8 +47,8 @@ pub async fn reactor(
                 }
                 count += 1;
                 let (sender, pmsg) = pmsg_opt.unwrap();
-                if myid != 0 {
-                    cx.send(sender, Arc::new(pmsg)).await;
+                if sender == 0 {
+                    cx.multicast(Arc::new(pmsg)).await;
                 }
                 if myid == 0 && count >= (cx.num_nodes() - 1) as u32 {
                     count = 0;
