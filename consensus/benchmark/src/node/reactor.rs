@@ -56,7 +56,7 @@ pub async fn reactor(
                     let payload: [u8; 500] = [0; 500];
                     let msg = ProtocolMsg{ payload: payload.to_vec() };
                     total += now.elapsed().as_micros();
-                    println!("Average Time: {}", total as f64 / iter as f64);
+                    println!("Iteration: {} | Average Time: {}",iter, total as f64 / iter as f64);
                     now = Instant::now();
                     cx.multicast(Arc::new(msg)).await;
                 }
