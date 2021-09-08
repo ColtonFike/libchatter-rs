@@ -58,6 +58,9 @@ pub async fn reactor(
                     total += now.elapsed().as_micros();
                     println!("Iteration: {} | Average Time: {}",iter, total as f64 / iter as f64);
                     now = Instant::now();
+                    if iter >= 10000 {
+                        std::process::exit(0);
+                    }
                     cx.multicast(Arc::new(msg)).await;
                 }
             },
