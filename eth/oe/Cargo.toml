@@ -1,0 +1,82 @@
+[package]
+name = "oe"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+blooms-db = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+log = "0.4"
+rustc-hex = "1.0"
+docopt = "1.0"
+clap = "2"
+term_size = "0.3"
+textwrap = "0.9"
+num_cpus = "1.2"
+number_prefix = "0.2"
+rpassword = "1.0"
+semver = "0.9"
+ansi_term = "0.10"
+parking_lot = "0.11.1"
+regex = "1.0"
+atty = "0.2.8"
+toml = "0.4"
+serde = "1.0"
+serde_json = "1.0"
+serde_derive = "1.0"
+futures = "0.1"
+hyper = { version = "0.12" }
+fdlimit = "0.1"
+ctrlc = { git = "https://github.com/paritytech/rust-ctrlc.git" }
+jsonrpc-core = "15.0.0"
+parity-bytes = "0.1"
+common-types = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+ethcore = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145", features = ["parity"] }
+ethcore-accounts = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145", optional = true }
+ethcore-blockchain = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+ethcore-call-contract = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+ethcore-db = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+ethcore-io = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+ethcore-logger = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+ethcore-miner = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+ethcore-network = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+ethcore-service = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+ethcore-sync = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+ethereum-types = "0.9.2"
+ethkey = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+ethstore = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+fetch = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+node-filter = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+parity-crypto = { version = "0.6.2", features = [ "publickey" ] }
+rlp = { version = "0.4.6" }
+cli-signer = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+parity-daemonize = "0.3"
+parity-local-store = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+parity-runtime = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+parity-rpc = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+parity-version = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+parity-path = "0.1"
+dir = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+panic_hook = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+keccak-hash = "0.5.0"
+migration-rocksdb = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+kvdb = "0.1"
+kvdb-rocksdb = "0.1.3"
+journaldb = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+stats = { git = "https://github.com/717a56e1/openethereum.git", rev = "16e96262bfaa25807c6ae27fc41c93d347f2d145" }
+prometheus = "0.9.0"
+
+[features]
+default = [ "accounts" ]
+accounts = [ "ethcore-accounts", "parity-rpc/accounts" ]
+miner-debug = ["ethcore/miner-debug"]
+json-tests = ["ethcore/json-tests"]
+ci-skip-tests = ["ethcore/ci-skip-tests"]
+test-heavy = ["ethcore/test-heavy"]
+evm-debug = ["ethcore/evm-debug"]
+evm-debug-tests = ["ethcore/evm-debug-tests"]
+slow-blocks = ["ethcore/slow-blocks"]
+final = ["parity-version/final"]
+deadlock_detection = ["parking_lot/deadlock_detection"]
+memory_profiling = []
