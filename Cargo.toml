@@ -38,4 +38,7 @@ members = [
     "examples/artemis/client",
     # Dummy consensus module
     "consensus/dummy",
+    # basic networking for testing
+    "consensus/net",
+    "examples/net",
 ]
