@@ -1,5 +1,5 @@
 use std::{
-    sync::Arc,
+    sync::{Arc, Mutex, mpsc},
     pin::Pin,
 };
 use fnv::FnvHashMap as HashMap;
@@ -34,6 +34,7 @@ use types::{
 use futures::Stream;
 use tokio_stream::{StreamMap, StreamExt};
 use super::peer::Peer;
+use super::reconnect::ReconnectionManager;
 
 use super::Protocol;
 
@@ -76,6 +77,7 @@ O:WireReady + Clone + Sync + 'static + Unpin,
         info!("Connected to all nodes in the protocol");
 
         // Create a unified reader stream
+        // let mut unified_stream = Arc::new(Mutex::new(StreamMap::new()));
         let mut unified_stream = StreamMap::new();
 
         // Create write end points for peers
@@ -107,6 +109,10 @@ O:WireReady + Clone + Sync + 'static + Unpin,
         let (in_send, in_recv) = unbounded_channel::<(Replica, I)>();
         let (out_send, out_recv) = unbounded_channel();
 
+        // Create reconnection manager
+        let (reconnect_tx, reconnect_rx) = mpsc::channel();
+        let reconnection_manager = ReconnectionManager::new(node_addr.clone(), self.my_id, dec.clone(), enc.clone(), reconnect_tx);
+
         // Start the event loop that processes network messages
         tokio::spawn(
             protocol_event_loop(
@@ -114,7 +120,9 @@ O:WireReady + Clone + Sync + 'static + Unpin,
                 in_send, 
                 out_recv, 
                 unified_stream, 
-                writer_end_points
+                writer_end_points,
+                reconnection_manager,
+                reconnect_rx
             )
         );
     
@@ -225,13 +233,21 @@ async fn outgoing_conn(
     writers
 }
 
-async fn protocol_event_loop<I,O>(
+async fn protocol_event_loop<I,O, D, E>(
     num_nodes: Replica, 
     mut in_send: UnboundedSender<(Replica, I)>,
     mut out_recv: UnboundedReceiver<(Replica, Arc<O>)>,
-    mut reading_net: impl Stream<Item=(Replica, I)>+Unpin,
-    writers: HashMap<Replica, UnboundedSender<Arc<O>>>
-) where I: WireReady
+    // mut reading_net: impl Stream<Item=(Replica, I)>+Unpin,
+    // reading_net: Arc<Mutex<StreamMap<Replica, UnboundedReceiver<I>>>>,
+    mut reading_net: StreamMap<Replica, UnboundedReceiver<I>>,
+    mut writers: HashMap<Replica, UnboundedSender<Arc<O>>>,
+    mut reconnect: ReconnectionManager<I, O, D, E>,
+    reconnect_rx: mpsc::Receiver<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
+)
+where I:WireReady + Send + Sync + 'static + Unpin,
+O:WireReady + Clone + Sync + 'static + Unpin, 
+D:Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static,
+E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
 {
     loop {
         tokio::select!{
@@ -239,6 +255,7 @@ async fn protocol_event_loop<I,O>(
                 if let None = opt_in {
                     log::error!(
                         "Failed to read a protocol message from a peer");
+                    // TODO handle disconnected peer!
                     std::process::exit(0);
                 }
                 let (id, msg) = opt_in.unwrap();
@@ -261,12 +278,26 @@ async fn protocol_event_loop<I,O>(
                         std::process::exit(0);
                     }
                 } else {
-                    for (id, writer) in &writers {
+                    let mut disconnected = Vec::new();
+                    // TODO how to not use clone here
+                    for (id, writer) in writers.clone() {
                         if let Err(e) = writer.clone().send(msg.clone()).await {
                             log::error!("Failed to send msg to peer {} with error {}", id, e);
-                            std::process::exit(0);
+                            disconnected.push(id);
+                            // here is where disconnect occurs
+                            // std::process::exit(0);
                             // TODO Handle disconnection from peer
                         }
+                    }
+
+                    for id in disconnected {
+                        log::info!("Removed peer {}", id);
+                        writers.remove(&id);
+                        reading_net.remove(&id);
+                        reconnect.add_new_reconnection(id, 1000).await;
+                        let (r, sender, receiver) = reconnect_rx.recv().unwrap();
+                        writers.insert(r, sender);
+                        reading_net.insert(r, receiver);
                     }
                 }
             },

@@ -82,14 +82,17 @@ O: WireReady+'static + Clone+Sync,
                     let mut s = stream::iter(to_send.into_iter().map(Ok));
                     if let Err(_e) = writer.send_all(&mut s).await {
                         log::error!("Failed to write a message to a peer");
+                        // TODO: Add reconnection protocol here!
                         std::process::exit(0);
                     }
                     if let Err(_e) = internal_ch_in_send.send(InternalInMsg::Ready).await {
                         log::error!("Failed to send a message to the internal channel");
                     }
                 } else {
-                    log::error!("Internal message channel closed");
-                    std::process::exit(0);
+                    log::error!("Internal message channel closed, returning");
+                    // Push the error out of peer??
+                    return;
+                    // std::process::exit(0);
                 }
             }
         });
@@ -101,8 +104,11 @@ O: WireReady+'static + Clone+Sync,
                 tokio::select! {
                     in_opt = reader.next() => {
                         if let None = in_opt {
-                            log::warn!("Disconnected from peer");
-                            std::process::exit(0);
+                            log::warn!("Disconnected from peer, returning");
+                            // TODO: Add reconnection protocol here!
+                            //std::process::exit(0);
+                            // Return pushes the error out of peer to protocol?
+                            return;
                         }
                         if let Some(Ok(x)) = in_opt {
                             if let Err(_e) = send_in.send(x).await {
