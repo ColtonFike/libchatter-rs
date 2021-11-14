@@ -59,26 +59,47 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
         }
     }
 
-    pub async fn add_new_reconnection(&mut self, id: Replica, timeout: u64) {
-        if self.reconnections.contains(&id) {
-            log::warn!("Already reconnecting to peer {}", id);
+    pub fn add_new_reconnection(&mut self, reconn_id: Replica, timeout: u64) {
+        if self.reconnections.contains(&reconn_id) {
+            log::warn!("Already reconnecting to peer {}", reconn_id);
             return;
         }
 
-        self.reconnections.insert(id);
+        self.reconnections.insert(reconn_id);
         log::info!("Detected new reconnection!");
 
-        let reader = tokio::spawn(Self::start_listener(self.node_addr[&self.my_id].clone())).await.expect("Failed to connect to disconnected node");
+        tokio::spawn(Self::reconnect(
+            self.my_id, 
+            self.node_addr[&self.my_id].clone(),
+            reconn_id, 
+            self.node_addr[&reconn_id].clone(), 
+            self.tx.clone(), 
+            self.dec.clone(), 
+            self.enc.clone(), 
+            timeout
+        ));
+    }
+    
+    async fn reconnect(
+        my_id: Replica, 
+        my_addr: String,
+        reconn_id: Replica, 
+        reconn_addr: String, 
+        tx: Sender<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>, 
+        dec: D,
+        enc: E,
+        timeout: u64) 
+    {
+        let reader = tokio::spawn(Self::start_listener(my_addr)).await.expect("Failed to connect to disconnected node");
         tokio::time::sleep(std::time::Duration::from_secs(40)).await;
-        let writer = Self::start_conn(self.my_id, self.node_addr[&id].clone()).await;
+        let writer = Self::start_conn(my_id, reconn_addr).await;
         log::info!("Successfullly reconnected!");
 
-        let peer = Peer::new(reader, writer, self.dec.clone(), self.enc.clone());
-
-        self.tx.send((id, peer.send, peer.recv));
+        let peer = Peer::new(reader, writer, dec, enc);
+        tx.send((reconn_id, peer.send, peer.recv)).unwrap();
     }
 
-    pub async fn start_listener(addr: String) -> Reader {
+    async fn start_listener(addr: String) -> Reader {
         let listener = TcpListener::bind(addr).await.expect("Failed to listen for dropped peer");
         log::info!("Listener Opened!");
         let (mut conn, _) = listener.accept().await.expect("Failed to listen to incoming connection");
@@ -91,7 +112,7 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
     }
 
 
-    pub async fn start_conn(my_id: Replica, addr: String) -> Writer {
+    async fn start_conn(my_id: Replica, addr: String) -> Writer {
         let id_buf =  my_id.to_be_bytes();
         let conn = TcpStream::connect(addr).await.expect("Failed to connect to a disconnected node");
         log::info!("Attempting To Connect!");

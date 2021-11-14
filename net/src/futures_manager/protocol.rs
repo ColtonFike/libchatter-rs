@@ -250,6 +250,10 @@ D:Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static,
 E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
 {
     loop {
+        if let Ok((r, writer, reader)) = reconnect_rx.try_recv() {
+            writers.insert(r, writer);
+            reading_net.insert(r, reader);
+        }
         tokio::select!{
             opt_in = reading_net.next() => {
                 if let None = opt_in {
@@ -294,10 +298,7 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
                         log::info!("Removed peer {}", id);
                         writers.remove(&id);
                         reading_net.remove(&id);
-                        reconnect.add_new_reconnection(id, 1000).await;
-                        let (r, sender, receiver) = reconnect_rx.recv().unwrap();
-                        writers.insert(r, sender);
-                        reading_net.insert(r, receiver);
+                        reconnect.add_new_reconnection(id, 1000);
                     }
                 }
             },
