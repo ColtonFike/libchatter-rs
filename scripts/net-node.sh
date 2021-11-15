@@ -6,4 +6,3 @@ W=${W:="80000"}
     --config $TESTDIR/nodes-$1.json \
     --ip ip_file \
     --sleep 20 \
-

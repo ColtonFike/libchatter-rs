@@ -90,7 +90,7 @@ O: WireReady+'static + Clone+Sync,
                     }
                 } else {
                     log::error!("Internal message channel closed, returning");
-                    // Push the error out of peer??
+                    // Push the error out of peer to the protocol
                     return;
                     // std::process::exit(0);
                 }

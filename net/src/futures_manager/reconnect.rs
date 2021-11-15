@@ -3,6 +3,7 @@ use fnv::FnvHashSet as HashSet;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use std::sync::{ Arc, Mutex, mpsc::Sender};
 use tokio::{
+    time::{Duration, self, Instant},
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
@@ -28,8 +29,8 @@ D:Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static,
 E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
 {
     reconnections: Arc<Mutex<HashSet<Replica>>>,
-    node_addr: HashMap<Replica, String>,
-    my_id: Replica,
+    node_addrs: HashMap<Replica, String>,
+    id: Replica,
     dec: D,
     enc: E,
     tx: Sender<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
@@ -43,36 +44,36 @@ D:Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static,
 E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
 {
     pub fn new(
-        node_addr: HashMap<Replica, String>,
-        my_id: Replica,
+        node_addrs: HashMap<Replica, String>,
+        id: Replica,
         dec: D,
         enc: E,
         tx: Sender<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
     ) -> Self {
         ReconnectionManager {
             reconnections: Arc::new(Mutex::new(HashSet::default())),
-            node_addr,
+            node_addrs,
             enc,
             dec,
-            my_id,
+            id,
             tx,
         }
     }
 
     pub fn add_new_reconnection(&mut self, reconn_id: Replica, timeout: u64) {
+        // do not start attempt at reconnecting if we are already attempting to connect
         if self.reconnections.lock().unwrap().contains(&reconn_id) {
-            log::warn!("Already reconnecting to peer {}", reconn_id);
             return;
         }
 
         self.reconnections.lock().unwrap().insert(reconn_id);
-        log::info!("Detected new reconnection!");
+        log::info!("Attempting to reconnect to peer {}", reconn_id);
 
         tokio::spawn(Self::reconnect(
-            self.my_id, 
-            self.node_addr[&self.my_id].clone(),
+            self.id, 
+            self.node_addrs[&self.id].clone(),
             reconn_id, 
-            self.node_addr[&reconn_id].clone(), 
+            self.node_addrs[&reconn_id].clone(), 
             self.tx.clone(), 
             self.dec.clone(), 
             self.enc.clone(), 
@@ -81,7 +82,6 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
         ));
     }
     
-    // TODO: Implement Timeouts
     async fn reconnect(
         my_id: Replica, 
         my_addr: String,
@@ -93,22 +93,38 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
         remove_from: Arc<Mutex<HashSet<Replica>>>,
         timeout: u64) 
     {
+        let time_to_timeout = Instant::now().checked_add(Duration::from_secs(timeout)).unwrap();
+        let writer;
 
-        let reader = tokio::spawn(Self::start_listener(my_addr)).await.expect("Failed to connect to disconnected node");
+        let mut interval = time::interval(Duration::from_millis(100));
+        // try to connect to disconnected node
+        loop {
+            // wait 100ms before checking for back online
+            interval.tick().await;
 
-
-        tokio::time::sleep(std::time::Duration::from_secs(40)).await;
-        let writer = Self::start_conn(my_id, reconn_addr).await;
-        log::info!("Successfullly reconnected!");
-
-        let peer = Peer::new(reader, writer, dec, enc);
-        tx.send((reconn_id, peer.send, peer.recv)).unwrap();
+            // successful connection!
+            if let Ok(w) = Self::attempt_conn(my_id, &reconn_addr).await {
+                writer = w;
+                break; 
+            } else if Instant::now() > time_to_timeout {
+                log::info!("Reconnection timed out");
+                return;
+            }
+        }
+        // start_listener, timeout if no connection in time
+        if let Ok(reader) = time::timeout_at(time_to_timeout, Self::start_listener(my_addr)).await {
+            // create peer and send the data protocol manager
+            let peer = Peer::new(reader, writer, dec, enc);
+            tx.send((reconn_id, peer.send, peer.recv)).unwrap();
+        } else {
+            log::info!("Reconnection timed out");
+        }
+        // regardless of success or timeout, remove peer from reconnections list
         remove_from.lock().unwrap().remove(&reconn_id);
     }
 
     async fn start_listener(addr: String) -> Reader {
         let listener = TcpListener::bind(addr).await.expect("Failed to listen for dropped peer");
-        log::info!("Listener Opened!");
         let (mut conn, _) = listener.accept().await.expect("Failed to listen to incoming connection");
         conn.set_nodelay(true).expect("Failed to set nodelay");
         let mut id_buf = [0 as u8; ID_BYTE_SIZE];
@@ -119,13 +135,11 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
     }
 
 
-    async fn start_conn(my_id: Replica, addr: String) -> Writer {
-        let id_buf =  my_id.to_be_bytes();
-        let conn = TcpStream::connect(addr).await.expect("Failed to connect to a disconnected node");
-        log::info!("Attempting To Connect!");
+    async fn attempt_conn(my_id: Replica, addr: &str) -> Result<Writer,Err> {
+        let conn = TcpStream::connect(addr).await?;
         conn.set_nodelay(true).expect("Failed to enable nodelay");
         let (_, mut writer) = conn.into_split();
-        writer.write_all(&id_buf).await.expect("Failed to send identification to node");
-        writer
+        writer.write_all(&my_id.to_be_bytes()).await.expect("Failed to send identification to node");
+        Ok(writer)
     }
 }

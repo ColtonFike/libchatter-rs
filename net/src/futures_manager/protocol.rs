@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, mpsc},
     pin::Pin,
 };
 use fnv::FnvHashMap as HashMap;
@@ -182,6 +182,7 @@ async fn start_conn_all(
         // Split the connection and drop the writing part
         let (read, _write) = conn.into_split();
 
+        println!("ID: {} They connected to me!", id);
         // Add this reader
         readers.insert(
             id, 
@@ -228,6 +229,7 @@ async fn outgoing_conn(
             .await
             .expect("Failed to send identification to a protocol node");
         
+        println!("ID: {} I connected to them!", id);
         writers.insert(id, write);
     }
     writers
@@ -248,16 +250,19 @@ D:Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static,
 E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
 {
     loop {
-        if let Ok((r, writer, reader)) = reconnect_rx.try_recv() {
-            writers.insert(r, writer);
-            reading_net.insert(r, reader);
+        if let Ok((id, writer, reader)) = reconnect_rx.try_recv() {
+            writers.insert(id, writer);
+            reading_net.insert(id, reader);
+            log::info!("Successfully reconnected to peer {}", id);
         }
+
         tokio::select!{
             opt_in = reading_net.next() => {
                 if let None = opt_in {
                     log::error!(
                         "Failed to read a protocol message from a peer");
-                    // TODO handle disconnected peer!
+                    // TODO this error occurs when no peers are connected
+                    // How should that situation be handled?
                     std::process::exit(0);
                 }
                 let (id, msg) = opt_in.unwrap();
@@ -281,22 +286,19 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
                     }
                 } else {
                     let mut disconnected = Vec::new();
-                    // TODO how to not use clone here
+
+                    // TODO how to not use clone here?
                     for (id, writer) in writers.clone() {
                         if let Err(e) = writer.clone().send(msg.clone()).await {
                             log::error!("Failed to send msg to peer {} with error {}", id, e);
                             disconnected.push(id);
-                            // here is where disconnect occurs
-                            // std::process::exit(0);
-                            // TODO Handle disconnection from peer
                         }
                     }
 
                     for id in disconnected {
-                        log::info!("Removed peer {}", id);
                         writers.remove(&id);
                         reading_net.remove(&id);
-                        reconnect.add_new_reconnection(id, 1000);
+                        reconnect.add_new_reconnection(id, 30);
                     }
                 }
             },
