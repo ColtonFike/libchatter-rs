@@ -237,8 +237,6 @@ async fn protocol_event_loop<I,O, D, E>(
     num_nodes: Replica, 
     mut in_send: UnboundedSender<(Replica, I)>,
     mut out_recv: UnboundedReceiver<(Replica, Arc<O>)>,
-    // mut reading_net: impl Stream<Item=(Replica, I)>+Unpin,
-    // reading_net: Arc<Mutex<StreamMap<Replica, UnboundedReceiver<I>>>>,
     mut reading_net: StreamMap<Replica, UnboundedReceiver<I>>,
     mut writers: HashMap<Replica, UnboundedSender<Arc<O>>>,
     mut reconnect: ReconnectionManager<I, O, D, E>,

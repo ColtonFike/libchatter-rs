@@ -1,7 +1,7 @@
 use fnv::FnvHashMap as HashMap;
 use fnv::FnvHashSet as HashSet;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
-use std::sync::{ Arc, mpsc::Sender};
+use std::sync::{ Arc, Mutex, mpsc::Sender};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -27,7 +27,7 @@ O:WireReady + Clone + Sync + 'static + Unpin,
 D:Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static,
 E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
 {
-    reconnections: HashSet<Replica>,
+    reconnections: Arc<Mutex<HashSet<Replica>>>,
     node_addr: HashMap<Replica, String>,
     my_id: Replica,
     dec: D,
@@ -50,7 +50,7 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
         tx: Sender<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
     ) -> Self {
         ReconnectionManager {
-            reconnections: HashSet::default(),
+            reconnections: Arc::new(Mutex::new(HashSet::default())),
             node_addr,
             enc,
             dec,
@@ -60,12 +60,12 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
     }
 
     pub fn add_new_reconnection(&mut self, reconn_id: Replica, timeout: u64) {
-        if self.reconnections.contains(&reconn_id) {
+        if self.reconnections.lock().unwrap().contains(&reconn_id) {
             log::warn!("Already reconnecting to peer {}", reconn_id);
             return;
         }
 
-        self.reconnections.insert(reconn_id);
+        self.reconnections.lock().unwrap().insert(reconn_id);
         log::info!("Detected new reconnection!");
 
         tokio::spawn(Self::reconnect(
@@ -76,10 +76,12 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
             self.tx.clone(), 
             self.dec.clone(), 
             self.enc.clone(), 
+            self.reconnections.clone(),
             timeout
         ));
     }
     
+    // TODO: Implement Timeouts
     async fn reconnect(
         my_id: Replica, 
         my_addr: String,
@@ -88,15 +90,20 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
         tx: Sender<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>, 
         dec: D,
         enc: E,
+        remove_from: Arc<Mutex<HashSet<Replica>>>,
         timeout: u64) 
     {
+
         let reader = tokio::spawn(Self::start_listener(my_addr)).await.expect("Failed to connect to disconnected node");
+
+
         tokio::time::sleep(std::time::Duration::from_secs(40)).await;
         let writer = Self::start_conn(my_id, reconn_addr).await;
         log::info!("Successfullly reconnected!");
 
         let peer = Peer::new(reader, writer, dec, enc);
         tx.send((reconn_id, peer.send, peer.recv)).unwrap();
+        remove_from.lock().unwrap().remove(&reconn_id);
     }
 
     async fn start_listener(addr: String) -> Reader {
