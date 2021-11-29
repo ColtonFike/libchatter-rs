@@ -9,4 +9,5 @@ pub use protocol::*;
 
 pub mod peer;
 
+mod connection;
 mod reconnect;

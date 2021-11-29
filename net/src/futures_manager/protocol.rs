@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
     pin::Pin,
 };
 use fnv::FnvHashMap as HashMap;
@@ -35,6 +35,7 @@ use futures::Stream;
 use tokio_stream::{StreamMap, StreamExt};
 use super::peer::Peer;
 use super::reconnect::ReconnectionManager;
+use super::connection::{self, ConnectionManager};
 
 use super::Protocol;
 
@@ -43,6 +44,7 @@ const ID_BYTE_SIZE:usize = std::mem::size_of::<Replica>();
 type Err = std::io::Error;
 type Reader = tokio::net::tcp::OwnedReadHalf;
 type Writer = tokio::net::tcp::OwnedWriteHalf;
+
 
 impl<I,O> Protocol<I,O>
 where I:WireReady + Send + Sync + 'static + Unpin,
@@ -55,24 +57,30 @@ O:WireReady + Clone + Sync + 'static + Unpin,
         dec: impl Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static
     ) -> (UnboundedSender<(Replica, Arc<O>)>, UnboundedReceiver<(Replica, I)>)
     {
+
+
         // Task that receives connections from everyone
-        let incoming_conn_task = 
-        tokio::spawn(
-            start_conn_all(node_addr.clone(), self.my_id)
-        );
+        // let incoming_conn_task =
+        // tokio::spawn(
+            // start_conn_all(node_addr.clone(), self.my_id)
+        // );
+
+        let (tx, rx) = mpsc::channel();
+        let cm = ConnectionManager::new(self.my_id, node_addr[&self.my_id].clone(), node_addr.clone(), tx, dec, enc).await;
+        // tokio::spawn(connection::listen(cm.clone()));
         
         // Sleep for sometime until we are sure everyone is listening
-        let sleep_time = unsafe {
-            config::SLEEP_TIME
-        };
-        tokio::time::sleep(std::time::Duration::from_secs(sleep_time)).await;
+        // let sleep_time = unsafe {
+            // config::SLEEP_TIME
+        // };
+        // tokio::time::sleep(std::time::Duration::from_secs(sleep_time)).await;
         
         // Start connecting to other nodes
-        let mut writers = outgoing_conn(self.my_id, &node_addr)
-            .await;
-        let mut readers = incoming_conn_task
-            .await
-            .expect("Failed to collect all readers");
+        // let mut writers = outgoing_conn(self.my_id, &node_addr)
+            // .await;
+        // let mut readers = incoming_conn_task
+            // .await
+            // .expect("Failed to collect all readers");
         
         info!("Connected to all nodes in the protocol");
 
@@ -86,22 +94,23 @@ O:WireReady + Clone + Sync + 'static + Unpin,
             if i == self.my_id {
                 continue;
             }
-            let read = readers.remove(&i).unwrap();
-            let write = writers.remove(&i).unwrap();
-            let enc = enc.clone();
-            let dec = dec.clone();
-            let peer = Peer::new(read, write, dec, enc);
-            let recv_ch = peer.recv;
-            unified_stream.insert(
-                i as Replica, 
+            // tokio::spawn(connection::connect(cm.clone(), i));
+            // let read = readers.remove(&i).unwrap();
+            // let write = writers.remove(&i).unwrap();
+            // let enc = enc.clone();
+            // let dec = dec.clone();
+            // let peer = Peer::new(read, write, dec, enc);
+            // let recv_ch = peer.recv;
+            // unified_stream.insert(
+                // i as Replica,
                 // Box::pin(async_stream::stream!{
-                //     while let Some(item) = recv_ch.recv().await {
-                //         yield(item);
-                //     }
+                    // while let Some(item) = recv_ch.recv().await {
+                        // yield(item);
+                    // }
                 // }) as Pin<Box<dyn Stream<Item=I>+Send>>
-                recv_ch
-            );
-            writer_end_points.insert(i as Replica, peer.send);
+                // recv_ch
+            // );
+            // writer_end_points.insert(i as Replica, peer.send);
         }
 
         // Create channels so that the outside world can communicate with the
@@ -110,8 +119,8 @@ O:WireReady + Clone + Sync + 'static + Unpin,
         let (out_send, out_recv) = unbounded_channel();
 
         // Create reconnection manager
-        let (reconnect_tx, reconnect_rx) = mpsc::channel();
-        let reconnection_manager = ReconnectionManager::new(node_addr.clone(), self.my_id, dec.clone(), enc.clone(), reconnect_tx);
+        // let (reconnect_tx, reconnect_rx) = mpsc::channel();
+        // let reconnection_manager = ReconnectionManager::new(node_addr.clone(), self.my_id, dec.clone(), enc.clone(), reconnect_tx);
 
         // Start the event loop that processes network messages
         tokio::spawn(
@@ -121,8 +130,8 @@ O:WireReady + Clone + Sync + 'static + Unpin,
                 out_recv, 
                 unified_stream, 
                 writer_end_points,
-                reconnection_manager,
-                reconnect_rx
+                cm.clone(),
+                rx,
             )
         );
     
@@ -182,7 +191,6 @@ async fn start_conn_all(
         // Split the connection and drop the writing part
         let (read, _write) = conn.into_split();
 
-        println!("ID: {} They connected to me!", id);
         // Add this reader
         readers.insert(
             id, 
@@ -241,8 +249,8 @@ async fn protocol_event_loop<I,O, D, E>(
     mut out_recv: UnboundedReceiver<(Replica, Arc<O>)>,
     mut reading_net: StreamMap<Replica, UnboundedReceiver<I>>,
     mut writers: HashMap<Replica, UnboundedSender<Arc<O>>>,
-    mut reconnect: ReconnectionManager<I, O, D, E>,
-    reconnect_rx: mpsc::Receiver<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
+    connect: Arc<ConnectionManager<I,O,D,E>>,
+    connect_rx: mpsc::Receiver<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
 )
 where I:WireReady + Send + Sync + 'static + Unpin,
 O:WireReady + Clone + Sync + 'static + Unpin, 
@@ -250,7 +258,7 @@ D:Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static,
 E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
 {
     loop {
-        if let Ok((id, writer, reader)) = reconnect_rx.try_recv() {
+        if let Ok((id, writer, reader)) = connect_rx.try_recv() {
             writers.insert(id, writer);
             reading_net.insert(id, reader);
             log::info!("Successfully reconnected to peer {}", id);
@@ -259,30 +267,31 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
         tokio::select!{
             opt_in = reading_net.next() => {
                 if let None = opt_in {
-                    log::error!(
-                        "Failed to read a protocol message from a peer");
+                    // log::error!(
+                        // "Failed to read a protocol message from a peer");
                     // TODO this error occurs when no peers are connected
                     // How should that situation be handled?
-                    std::process::exit(0);
+                    continue;
+                    // std::process::exit(0);
                 }
                 let (id, msg) = opt_in.unwrap();
                 if let Err(e) = in_send.send((id, msg.init())).await {
                     log::error!(
                         "Failed to send a protocol message outside the network, with error {}", e);
-                    std::process::exit(0);
+                    //std::process::exit(0);
                 }
             },
             opt_out = out_recv.next() => {
                 if let None = opt_out {
                     log::error!(
                         "Failed to read a protocol message to send outside the network");
-                    std::process::exit(0);
+                    //std::process::exit(0);
                 }
                 let (to, msg) = opt_out.unwrap();
                 if to < num_nodes {
                     if let Err(_e) = writers[&to].clone().send(msg).await {
                         log::error!("Failed to send msg to peer {}", to);
-                        std::process::exit(0);
+                        //std::process::exit(0);
                     }
                 } else {
                     let mut disconnected = Vec::new();
@@ -298,7 +307,8 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
                     for id in disconnected {
                         writers.remove(&id);
                         reading_net.remove(&id);
-                        reconnect.add_new_reconnection(id, 30);
+                        // connect.add_new_reconnection(id, 30);
+                        ConnectionManager::add_connection(connect.clone(), id);
                     }
                 }
             },

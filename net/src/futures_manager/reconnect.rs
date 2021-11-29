@@ -28,12 +28,13 @@ O:WireReady + Clone + Sync + 'static + Unpin,
 D:Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static,
 E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
 {
-    reconnections: Arc<Mutex<HashSet<Replica>>>,
+    reconnections: Arc<Mutex<HashMap<Replica, (Option<Writer>, Option<Reader>)>>>,
     node_addrs: HashMap<Replica, String>,
     id: Replica,
     dec: D,
     enc: E,
     tx: Sender<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
+    listener: TcpListener,
 }
 
 impl<I, O, D, E> ReconnectionManager<I, O, D, E>
@@ -43,32 +44,36 @@ O:WireReady + Clone + Sync + 'static + Unpin,
 D:Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static,
 E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
 {
-    pub fn new(
+    pub async fn new(
         node_addrs: HashMap<Replica, String>,
         id: Replica,
         dec: D,
         enc: E,
         tx: Sender<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
     ) -> Self {
+        let listener = TcpListener::bind(node_addrs[&id].clone()).await.expect("Failed to listen for dropped peer");
         ReconnectionManager {
-            reconnections: Arc::new(Mutex::new(HashSet::default())),
+            reconnections: Arc::new(Mutex::new(HashMap::default())),
             node_addrs,
             enc,
             dec,
             id,
             tx,
+            listener,    
         }
     }
 
+    // TODO crashes on two disconnections at a time because we try to open two listeners
     pub fn add_new_reconnection(&mut self, reconn_id: Replica, timeout: u64) {
         // do not start attempt at reconnecting if we are already attempting to connect
-        if self.reconnections.lock().unwrap().contains(&reconn_id) {
+        if self.reconnections.lock().unwrap().contains_key(&reconn_id) {
             return;
         }
 
-        self.reconnections.lock().unwrap().insert(reconn_id);
+        self.reconnections.lock().unwrap().insert(reconn_id, (None, None));
         log::info!("Attempting to reconnect to peer {}", reconn_id);
 
+        // make reconnect check the listener for connection, on connection, connect to them
         tokio::spawn(Self::reconnect(
             self.id, 
             self.node_addrs[&self.id].clone(),
@@ -90,7 +95,7 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
         tx: Sender<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>, 
         dec: D,
         enc: E,
-        remove_from: Arc<Mutex<HashSet<Replica>>>,
+        remove_from: Arc<Mutex<HashMap<Replica, (Option<Writer>, Option<Reader>)>>>,
         timeout: u64) 
     {
         let time_to_timeout = Instant::now().checked_add(Duration::from_secs(timeout)).unwrap();

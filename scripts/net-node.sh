@@ -1,4 +1,4 @@
-TESTDIR=${TESTDIR:="testdata/b100-n3"}
+TESTDIR=${TESTDIR:="testdata/n4"}
 TYPE=${TYPE:="debug"}
 W=${W:="80000"}
 

@@ -83,7 +83,8 @@ O: WireReady+'static + Clone+Sync,
                     if let Err(_e) = writer.send_all(&mut s).await {
                         log::error!("Failed to write a message to a peer");
                         // TODO: Add reconnection protocol here!
-                        std::process::exit(0);
+                        // std::process::exit(0);
+                        return
                     }
                     if let Err(_e) = internal_ch_in_send.send(InternalInMsg::Ready).await {
                         log::error!("Failed to send a message to the internal channel");
@@ -113,14 +114,16 @@ O: WireReady+'static + Clone+Sync,
                         if let Some(Ok(x)) = in_opt {
                             if let Err(_e) = send_in.send(x).await {
                                 log::warn!("Error in sending out");
-                                std::process::exit(0);
+                                return;
+                                // std::process::exit(0);
                             }
                         }
                     },
                     out_opt = recv_out.next() => {
                         if let None = out_opt {
                             log::warn!("Error in receiving message");
-                            std::process::exit(0);
+                            return;
+                            // std::process::exit(0);
                         }
                         if let Some(x) = out_opt {
                             // Write if not already writing, otherwise
@@ -129,7 +132,8 @@ O: WireReady+'static + Clone+Sync,
                                 buffers.push_back(x);
                                 if let Err(_e) = internal_ch_out_send.send(InternalOutMsg::Batch(buffers)).await {
                                     log::warn!("Error in sending message out");
-                                    std::process::exit(0);
+                                    // std::process::exit(0);
+                                    return;
                                 }
                                 buffers = VecDeque::new();
                             } else {
@@ -142,7 +146,8 @@ O: WireReady+'static + Clone+Sync,
                             ready = true;                                
                         } else {
                             log::warn!("Error in getting message from int channel");
-                            std::process::exit(0);
+                            // std::process::exit(0);
+                            return;
                         }
                     }
                 }
