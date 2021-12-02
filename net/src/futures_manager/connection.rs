@@ -2,11 +2,12 @@ use super::peer::Peer;
 use fnv::FnvHashMap as HashMap;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use log;
-use std::sync::{mpsc::Sender, Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     time::{self, Duration},
+    sync::{mpsc::{self, Sender, Receiver}},
 };
 use tokio_util::codec::{Decoder, Encoder};
 use types::{Replica, WireReady};
@@ -18,10 +19,27 @@ type Err = std::io::Error;
 const ID_BYTE_SIZE: usize = std::mem::size_of::<Replica>();
 
 #[derive(Debug)]
+struct Pending {
+    reader: Option<Reader>,
+    writer: Option<Writer>,
+}
+
+#[derive(Debug)]
 enum ConnectionState {
     Connected,
-    // TODO maybe pending should include a timeout var??
-    Pending((Option<Reader>, Option<Writer>)),
+    Pending(Pending),
+}
+
+#[derive(Debug)]
+enum Message {
+    Reader(Reader),
+    Writer(Writer),
+}
+
+#[derive(Debug)]
+pub enum Function {
+    // AddConnection(Replica, String),
+    AddConnection(Replica),
 }
 
 pub struct ConnectionManager<I, O, D, E>
@@ -31,14 +49,17 @@ where
     D: Decoder<Item = I, Error = Err> + Clone + Send + Sync + 'static,
     E: Encoder<Arc<O>> + Clone + Send + Sync + 'static,
 {
-    known_peers: RwLock<HashMap<Replica, String>>,
-    peers: Mutex<HashMap<Replica, ConnectionState>>,
+    known_peers: HashMap<Replica, String>,
+    peers: HashMap<Replica, Pending>,
     id: Replica,
     addr: String,
-    tx: Mutex<Sender<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>>,
+    tx: std::sync::mpsc::Sender<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
+    r: Receiver<(Replica, Message)>,
+    t: Sender<(Replica, Message)>,
+    fun: Receiver<Function>,
     dec: D,
     enc: E,
-    connecting: Mutex<bool>,
+    connect: Arc<Mutex<bool>>,
 }
 
 impl<I, O, D, E> ConnectionManager<I, O, D, E>
@@ -52,60 +73,105 @@ where
         id: Replica,
         addr: String,
         known_peers: HashMap<Replica, String>,
-        tx: Sender<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
+        tx: std::sync::mpsc::Sender<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
         dec: D,
         enc: E,
-    ) -> Arc<Self> {
-        let cm = Arc::new(ConnectionManager {
+    ) -> Sender<Function> {
+    // ){
+        let (t, r) = mpsc::channel(100);
+        let (send, fun) = mpsc::channel(100);
+        let mut cm = ConnectionManager {
             id,
             addr,
-            known_peers: RwLock::new(known_peers),
-            tx: Mutex::new(tx),
-            // peers: RwLock::new(HashMap::default()),
-            peers: Mutex::new(HashMap::default()),
+            known_peers: known_peers,
+            tx: tx,
+            r,
+            t,
+            fun,
+            peers: HashMap::default(),
             dec,
             enc,
-            connecting: Mutex::new(false),
-        });
+            connect: Arc::new(Mutex::new(false)),
+        };
 
         {
-            let mut peers = cm.peers.lock().unwrap();
-            for (id, _) in cm.known_peers.read().unwrap().iter() {
+            for (id, _) in cm.known_peers.iter() {
                 if *id == cm.id {
                     continue;
                 }
-                peers.insert(id.clone(), ConnectionState::Pending((None, None)));
+                cm.peers.insert(id.clone(), Pending{reader: None, writer: None});
             }
         }
 
-        tokio::spawn(Self::listen(cm.clone()));
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        tokio::spawn(Self::connect(cm.clone()));
-
-        cm
+        tokio::spawn(Self::event_handler(cm));
+        send
     }
 
-    pub fn add_connection(cm: Arc<Self>, id: Replica) {
-        let mut peers = cm.peers.lock().unwrap();
-        if let ConnectionState::Pending(_) = peers[&id] {
-            return;
+
+    pub async fn event_handler(mut cm: Self) {
+
+        let (mut t, mut r) = mpsc::channel(100);
+        tokio::spawn(Self::listen(cm.addr, cm.t.clone()));
+        tokio::spawn(Self::connect(cm.id, cm.t.clone(), r, cm.connect.clone()));
+
+        for (id, _) in &cm.peers {
+            t.send((*id, cm.known_peers.get(id).unwrap().clone())).await.unwrap();
         }
-        peers.insert(id.clone(), ConnectionState::Pending((None, None)));
-        if !*cm.connecting.lock().unwrap() {
-            tokio::spawn(Self::connect(cm.clone()));
-        }
+        loop {
+            tokio::select! {
+                mm = cm.r.recv() => {
+                    let m = mm.unwrap();
+                    match m.1 {
+                        // TODO Handle unwrap errors for when peer doesn't exist
+                        Message::Reader(r) => cm.peers.get_mut(&m.0).unwrap().reader = Some(r),
+                        Message::Writer(w) => cm.peers.get_mut(&m.0).unwrap().writer = Some(w),
+                    }
+                    if let Some(_) = cm.peers.get(&m.0).unwrap().writer {
+                        if let Some(_) = cm.peers.get(&m.0).unwrap().reader {
+                            let peer = cm.peers.remove(&m.0).unwrap();
+                            let p = Peer::new(peer.reader.unwrap(), peer.writer.unwrap(), cm.dec.clone(), cm.enc.clone());
+                            cm.tx.send((m.0, p.send, p.recv)).unwrap();
+                        }
+                    }
+                },
+                mm = cm.fun.recv() => {
+                    let fun = mm.unwrap();
+                    match fun {
+                        // Function::AddConnection(id, addr) => {
+                        Function::AddConnection(id) => {
+                            log::info!("Attempting to reconnect to {}", id.clone());
+                            log::info!("Connections! {}", *cm.connect.lock().unwrap());
+                            cm.peers.insert(id.clone(), super::connection::Pending{reader: None, writer: None});
+                            if !*cm.connect.lock().unwrap() {
+                                let (a,b) = mpsc::channel(100);
+                                t = a;
+                                r = b;
+                                tokio::spawn(Self::connect(cm.id, cm.t.clone(), r, cm.connect.clone()));
+                            }
+                            t.send((id, cm.known_peers.get(&id).unwrap().clone())).await.unwrap();
+                        },
+                    }
+                },
+            };
+        } 
     }
 
-    async fn listen(cm: Arc<Self>) {
-        let listener = TcpListener::bind(cm.addr.clone()).await.expect("Failed to listen for connections");
+    async fn listen(addr: String, tx: Sender<(Replica, Message)>) {
+        let listener = TcpListener::bind(addr).await.expect("Failed to listen for connections");
+        let mut count = 0;
 
         loop {
             let (conn, from) = listener.accept().await.expect("Listener closed while accepting");
-            tokio::spawn(Self::accept_conn(cm.clone(), conn, from));
+            tokio::spawn(Self::accept_conn(tx.clone(), conn, from));
+            count += 1;
+            if count >= 2 {
+                println!("Closed node listener!");
+                return;
+            }
         }
     }
-    
-    async fn accept_conn(cm: Arc<Self>, mut conn: TcpStream, from: std::net::SocketAddr) {
+
+    async fn accept_conn(tx: Sender<(Replica, Message)>, mut conn: TcpStream, from: std::net::SocketAddr) {
         log::info!("New incoming connection from {}", from.clone());
         conn.set_nodelay(true).expect("Failed to set nodelay");
 
@@ -113,84 +179,54 @@ where
         let mut id_buf = [0 as u8; ID_BYTE_SIZE];
         conn.read_exact(&mut id_buf).await.expect("Failed to read ID from new connection");
         let id = Replica::from_be_bytes(id_buf);
-
-        if !cm.peers.lock().unwrap().contains_key(&id) {
-            cm.peers.lock().unwrap().insert(id, ConnectionState::Pending((None, None)));
-        }
+        log::info!("ID of new connection {}", id.clone());
 
         let (read, _) = conn.into_split();
-
-        let mut peers = cm.peers.lock().unwrap();
-        if let ConnectionState::Pending((r, _)) = peers.get_mut(&id).unwrap() {
-            *r = Some(read);
-        }
-
-        // Now check if we have both a reader and a writer
-        if let ConnectionState::Pending((Some(_), Some(_))) = peers.get(&id).unwrap() {
-            let removed = peers.remove(&id).unwrap();
-            if let ConnectionState::Pending((Some(reader), Some(writer))) = removed {//peers.remove(&id).unwrap() {
-                let peer = Peer::new(reader, writer, cm.dec.clone(), cm.enc.clone());
-                peers.insert(id, ConnectionState::Connected);
-                cm.tx.lock().unwrap().send((id, peer.send, peer.recv)).unwrap();
-            }
-        }
+        tx.send((id, Message::Reader(read))).await.unwrap();
     }
 
-    async fn connect(cm: Arc<Self>) {
-
-        {
-            *cm.connecting.lock().unwrap() = true;
-        }
+    // TODO Maintain bool to signal when this loop is running
+    async fn connect(my_id: Replica, tx: Sender<(Replica, Message)>, mut rx: Receiver<(Replica, String)>, connect: Arc<Mutex<bool>>) {
 
         let mut interval = time::interval(Duration::from_millis(100));
 
-        // TODO: Timeout!
+        let mut to_connect = HashMap::default();
+        *connect.lock().unwrap() = true;
+        log::info!("Starting Connections! {}", *connect.lock().unwrap());
         loop {
 
             interval.tick().await;
-            let iter: Vec<usize> = {
-                let peers = cm.peers.lock().unwrap();
-                peers.iter().filter_map(|value| 
-                    match value.1 {
-                    ConnectionState::Pending((_, None)) => Some(value.0.clone()),
-                    _ => None,
-                }).collect()
-            };
+
+            let mut r = rx.try_recv();
+            while r.is_ok() {
+                let (id, addr) = r.unwrap();
+                to_connect.insert(id, addr);
+                r = rx.try_recv();
+            }
+
+            let iter: Vec<(Replica, String)> = to_connect.iter().map(|(key, value)| (*key, value.clone())).collect();
 
             if iter.len() <= 0 {
                 break;
             }
 
 
-            for id in iter {
+            for (id, addr) in iter {
 
-                log::info!("Attempting to connect to {}",id);
-                let addr = cm.known_peers.read().unwrap()[&id].clone();
+                // log::info!("Attempting to connect to {}", id);
 
                 let mut write = match Self::attempt_conn(addr).await {
                     Err(_) => continue,
                     Ok(w) => w,
                 };
 
-                write.write_all(&cm.id.to_be_bytes()).await.expect("Failed to send identification to node");
-
-                let mut peers = cm.peers.lock().unwrap();
-                if let ConnectionState::Pending((_, w)) = peers.get_mut(&id).unwrap() {
-                    *w = Some(write);
-                }
-
-                // Now check if we have both a reader and a writer
-                if let ConnectionState::Pending((Some(_), Some(_))) = peers.get(&id).unwrap() {
-                    let removed = peers.remove(&id).unwrap();
-                    if let ConnectionState::Pending((Some(reader), Some(writer))) = removed {//peers.remove(&id).unwrap() {
-                        let peer = Peer::new(reader, writer, cm.dec.clone(), cm.enc.clone());
-                        peers.insert(id, ConnectionState::Connected);
-                        cm.tx.lock().unwrap().send((id, peer.send, peer.recv)).unwrap();
-                    }
-                }
+                write.write_all(&my_id.to_be_bytes()).await.expect("Failed to send identification to node");
+                to_connect.remove(&id);
+                tx.send((id, Message::Writer(write))).await.unwrap();
             }
         }
-        *cm.connecting.lock().unwrap() = false;
+        *connect.lock().unwrap() = false;
+        log::info!("Ending Connections! {}", *connect.lock().unwrap());
     }
 
     async fn attempt_conn(addr: String) -> Result<Writer, Err> {

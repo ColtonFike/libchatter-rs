@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, mpsc},
     pin::Pin,
 };
 use fnv::FnvHashMap as HashMap;
@@ -13,6 +13,7 @@ use tokio::{
         TcpListener, 
         TcpStream
     }, 
+    sync::mpsc::Sender,
 };
 use futures::{
     channel::mpsc::{
@@ -34,8 +35,7 @@ use types::{
 use futures::Stream;
 use tokio_stream::{StreamMap, StreamExt};
 use super::peer::Peer;
-use super::reconnect::ReconnectionManager;
-use super::connection::{self, ConnectionManager};
+use super::connection::{ConnectionManager, Function};
 
 use super::Protocol;
 
@@ -66,7 +66,7 @@ O:WireReady + Clone + Sync + 'static + Unpin,
         // );
 
         let (tx, rx) = mpsc::channel();
-        let cm = ConnectionManager::new(self.my_id, node_addr[&self.my_id].clone(), node_addr.clone(), tx, dec, enc).await;
+        let sender = ConnectionManager::new(self.my_id, node_addr[&self.my_id].clone(), node_addr.clone(), tx, dec, enc).await;
         // tokio::spawn(connection::listen(cm.clone()));
         
         // Sleep for sometime until we are sure everyone is listening
@@ -130,7 +130,7 @@ O:WireReady + Clone + Sync + 'static + Unpin,
                 out_recv, 
                 unified_stream, 
                 writer_end_points,
-                cm.clone(),
+                sender,
                 rx,
             )
         );
@@ -243,19 +243,19 @@ async fn outgoing_conn(
     writers
 }
 
-async fn protocol_event_loop<I,O, D, E>(
+async fn protocol_event_loop<I,O>(
     num_nodes: Replica, 
     mut in_send: UnboundedSender<(Replica, I)>,
     mut out_recv: UnboundedReceiver<(Replica, Arc<O>)>,
     mut reading_net: StreamMap<Replica, UnboundedReceiver<I>>,
     mut writers: HashMap<Replica, UnboundedSender<Arc<O>>>,
-    connect: Arc<ConnectionManager<I,O,D,E>>,
+    mut sender: Sender<Function>,
     connect_rx: mpsc::Receiver<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
 )
 where I:WireReady + Send + Sync + 'static + Unpin,
 O:WireReady + Clone + Sync + 'static + Unpin, 
-D:Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static,
-E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
+// D:Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static,
+// E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
 {
     loop {
         if let Ok((id, writer, reader)) = connect_rx.try_recv() {
@@ -308,7 +308,8 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
                         writers.remove(&id);
                         reading_net.remove(&id);
                         // connect.add_new_reconnection(id, 30);
-                        ConnectionManager::add_connection(connect.clone(), id);
+                        sender.send(Function::AddConnection(id)).await.unwrap();
+                        // ConnectionManager::add_connection(connect.clone(), id);
                     }
                 }
             },
@@ -318,9 +319,11 @@ E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
 
 async fn cli_manager(addr: String) -> UnboundedReceiver<TcpStream> {
     // Wait for new connections
+    println!("Listening for client connections!");
     let cli_sock = TcpListener::bind(addr)
         .await
         .expect("Failed to listen to client connections");
+    println!("Success Listening for client connections!");
 
     // Create channels to let the world know that we have a new client
     // connection
