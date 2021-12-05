@@ -1,19 +1,13 @@
 use std::{
-    sync::{Arc, mpsc},
+    sync::Arc,
     pin::Pin,
 };
 use fnv::FnvHashMap as HashMap;
-use log::info;
 use tokio::{
-    io::{
-        AsyncReadExt, 
-        AsyncWriteExt
-    }, 
     net::{
         TcpListener, 
         TcpStream
     }, 
-    sync::mpsc::Sender,
 };
 use futures::{
     channel::mpsc::{
@@ -39,12 +33,7 @@ use super::connection::{ConnectionManager, Function};
 
 use super::Protocol;
 
-const ID_BYTE_SIZE:usize = std::mem::size_of::<Replica>();
-
 type Err = std::io::Error;
-type Reader = tokio::net::tcp::OwnedReadHalf;
-type Writer = tokio::net::tcp::OwnedWriteHalf;
-
 
 impl<I,O> Protocol<I,O>
 where I:WireReady + Send + Sync + 'static + Unpin,
@@ -57,70 +46,24 @@ O:WireReady + Clone + Sync + 'static + Unpin,
         dec: impl Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static
     ) -> (UnboundedSender<(Replica, Arc<O>)>, UnboundedReceiver<(Replica, I)>)
     {
-
-
-        // Task that receives connections from everyone
-        // let incoming_conn_task =
-        // tokio::spawn(
-            // start_conn_all(node_addr.clone(), self.my_id)
-        // );
-
-        let (tx, rx) = mpsc::channel();
-        let sender = ConnectionManager::new(self.my_id, node_addr[&self.my_id].clone(), node_addr.clone(), tx, dec, enc).await;
-        // tokio::spawn(connection::listen(cm.clone()));
-        
-        // Sleep for sometime until we are sure everyone is listening
-        // let sleep_time = unsafe {
-            // config::SLEEP_TIME
-        // };
-        // tokio::time::sleep(std::time::Duration::from_secs(sleep_time)).await;
-        
-        // Start connecting to other nodes
-        // let mut writers = outgoing_conn(self.my_id, &node_addr)
-            // .await;
-        // let mut readers = incoming_conn_task
-            // .await
-            // .expect("Failed to collect all readers");
-        
-        info!("Connected to all nodes in the protocol");
+        let (new_connections_tx, new_connections_rx) = unbounded_channel::<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>();
+        let function_caller = ConnectionManager::new(self.my_id, node_addr[&self.my_id].clone(), node_addr.clone(), new_connections_tx, dec, enc).await;
 
         // Create a unified reader stream
-        // let mut unified_stream = Arc::new(Mutex::new(StreamMap::new()));
-        let mut unified_stream = StreamMap::new();
+        let unified_stream = StreamMap::new();
 
         // Create write end points for peers
-        let mut writer_end_points = HashMap::default();
+        let writer_end_points = HashMap::default();
         for i in 0..self.num_nodes {
             if i == self.my_id {
                 continue;
             }
-            // tokio::spawn(connection::connect(cm.clone(), i));
-            // let read = readers.remove(&i).unwrap();
-            // let write = writers.remove(&i).unwrap();
-            // let enc = enc.clone();
-            // let dec = dec.clone();
-            // let peer = Peer::new(read, write, dec, enc);
-            // let recv_ch = peer.recv;
-            // unified_stream.insert(
-                // i as Replica,
-                // Box::pin(async_stream::stream!{
-                    // while let Some(item) = recv_ch.recv().await {
-                        // yield(item);
-                    // }
-                // }) as Pin<Box<dyn Stream<Item=I>+Send>>
-                // recv_ch
-            // );
-            // writer_end_points.insert(i as Replica, peer.send);
         }
 
         // Create channels so that the outside world can communicate with the
         // network
         let (in_send, in_recv) = unbounded_channel::<(Replica, I)>();
         let (out_send, out_recv) = unbounded_channel();
-
-        // Create reconnection manager
-        // let (reconnect_tx, reconnect_rx) = mpsc::channel();
-        // let reconnection_manager = ReconnectionManager::new(node_addr.clone(), self.my_id, dec.clone(), enc.clone(), reconnect_tx);
 
         // Start the event loop that processes network messages
         tokio::spawn(
@@ -130,8 +73,8 @@ O:WireReady + Clone + Sync + 'static + Unpin,
                 out_recv, 
                 unified_stream, 
                 writer_end_points,
-                sender,
-                rx,
+                function_caller,
+                new_connections_rx,
             )
         );
     
@@ -156,115 +99,30 @@ O:WireReady + Clone + Sync + 'static + Unpin,
     }
 }
 
-async fn start_conn_all(
-    node_addr: HashMap<Replica, String>,
-    my_id: Replica,
-) -> HashMap<Replica, Reader>
-{
-    // Start listening to incoming connections
-    let listener = TcpListener::bind(
-        &node_addr[&my_id]
-    )   .await
-    .expect("Failed to listen to protocol messages");
-    let node_addr = node_addr.clone();
-    let n = node_addr.len();
-    let mut readers = HashMap::with_capacity_and_hasher(n, Default::default());
-    for _i in 1..n {
-        // Connect to a new node
-        let (mut conn, from) = listener.accept()
-            .await
-            .expect("Failed to listen to incoming connections");
-        
-        // Set nodelay
-        conn.set_nodelay(true).expect("Failed to set nodelay");
-        
-        info!("New incoming connection from {}", from);
-        
-        // Get the ID of the connector
-        let mut id_buf = [0 as u8; ID_BYTE_SIZE];
-        conn
-            .read_exact(&mut id_buf)
-            .await
-            .expect("Failed to read ID bytes");
-        let id = Replica::from_be_bytes(id_buf);
-        
-        // Split the connection and drop the writing part
-        let (read, _write) = conn.into_split();
-
-        // Add this reader
-        readers.insert(
-            id, 
-            read
-        );
-    }
-    #[cfg(attr="debug")]
-    println!("");
-    readers
-}
-
-async fn outgoing_conn(
-    my_id: Replica, 
-    node_addr: &HashMap<Replica, String>,
-)  -> HashMap<Replica, Writer>
-{
-    // Create bytes of the ID
-    let id_buf = my_id.to_be_bytes();
-    
-    let mut writers = HashMap::default();
-    for (id, addr) in node_addr {
-        let id = *id as Replica;
-        
-        // Do not connect to self
-        if id == my_id {
-            continue;
-        }
-        
-        // Connect to the node
-        let conn = TcpStream::connect(addr)
-        .await
-        .expect("Failed to connect to a protocol node");
-        // Enbale high speed connection
-        conn
-        .set_nodelay(true)
-        .expect("Failed to enable nodelay on the connection");
-        
-        // Split the socket into seperate RW components
-        let (_read, mut write) = conn.into_split();
-        
-        // Send id of self on the connection
-        write
-            .write_all(&id_buf)
-            .await
-            .expect("Failed to send identification to a protocol node");
-        
-        println!("ID: {} I connected to them!", id);
-        writers.insert(id, write);
-    }
-    writers
-}
-
 async fn protocol_event_loop<I,O>(
     num_nodes: Replica, 
     mut in_send: UnboundedSender<(Replica, I)>,
     mut out_recv: UnboundedReceiver<(Replica, Arc<O>)>,
     mut reading_net: StreamMap<Replica, UnboundedReceiver<I>>,
     mut writers: HashMap<Replica, UnboundedSender<Arc<O>>>,
-    mut sender: Sender<Function>,
-    connect_rx: mpsc::Receiver<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
+    mut function_caller: UnboundedSender<Function>,
+    mut new_connections: UnboundedReceiver<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
 )
 where I:WireReady + Send + Sync + 'static + Unpin,
 O:WireReady + Clone + Sync + 'static + Unpin, 
-// D:Decoder<Item=I, Error=Err> + Clone + Send + Sync + 'static,
-// E:Encoder<Arc<O>> + Clone + Send + Sync + 'static,
 {
     loop {
-        if let Ok((id, writer, reader)) = connect_rx.try_recv() {
-            writers.insert(id, writer);
-            reading_net.insert(id, reader);
-            log::info!("Successfully reconnected to peer {}", id);
-        }
-
         tokio::select!{
+            new_connection = new_connections.next() => {
+                if let None = new_connection {
+                    log::info!("Internal connection manager closed");
+                    std::process::exit(0);
+                }
+                let (id, writer, reader) = new_connection.unwrap();
+                writers.insert(id, writer);
+                reading_net.insert(id, reader);
+                log::info!("Successfully connected to peer {}", id);
+            },
             opt_in = reading_net.next() => {
                 if let None = opt_in {
                     // log::error!(
@@ -307,9 +165,8 @@ O:WireReady + Clone + Sync + 'static + Unpin,
                     for id in disconnected {
                         writers.remove(&id);
                         reading_net.remove(&id);
-                        // connect.add_new_reconnection(id, 30);
-                        sender.send(Function::AddConnection(id)).await.unwrap();
-                        // ConnectionManager::add_connection(connect.clone(), id);
+                        log::info!("Adding new disconnected node! {}", id.clone());
+                        function_caller.send(Function::AddConnection(id)).await.unwrap();
                     }
                 }
             },
