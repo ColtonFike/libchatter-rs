@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    time::{self, Duration},
+    time::{self, Duration, Instant},
     sync::{Notify},
 };
 use tokio_util::codec::{Decoder, Encoder};
@@ -29,12 +29,12 @@ struct Pending {
 enum Message {
     Reader(Reader),
     Writer(Writer),
+    Timeout(Replica),
 }
 
 #[derive(Debug)]
 pub enum Function {
-    // AddConnection(Replica, String),
-    AddConnection(Replica),
+    AddConnection(Replica, u64),
 }
 
 pub struct ConnectionManager<I, O, D, E>
@@ -51,7 +51,7 @@ where
     completed_connections: UnboundedSender<(Replica, UnboundedSender<Arc<O>>, UnboundedReceiver<I>)>,
     function_calls: UnboundedReceiver<Function>,
     new_connections: UnboundedReceiver<(Replica, Message)>,
-    add_connection: UnboundedSender<(Replica, String)>,
+    add_connection: UnboundedSender<(Replica, String, u64)>,
     dec: D,
     enc: E,
 }
@@ -73,7 +73,7 @@ where
     ) -> UnboundedSender<Function> {
         let (new_connections_tx, new_connections) = unbounded::<(Replica, Message)>();
         let (function_caller, function_calls) = unbounded::<Function>();
-        let (add_connection, add_connection_rx) = unbounded::<(Replica, String)>();
+        let (add_connection, add_connection_rx) = unbounded::<(Replica, String, u64)>();
         let mut cm = ConnectionManager {
             id,
             addr,
@@ -97,16 +97,47 @@ where
         tokio::spawn(Self::event_handler(cm, new_connections_tx, add_connection_rx));
         function_caller
     }
+    
+    async fn finalize_connection(&mut self, id: Replica) {
+        if let Some(_) = self.peers.get(&id).unwrap().writer {
+            if let Some(_) = self.peers.get(&id).unwrap().reader {
+                let peer = self.peers.remove(&id).unwrap();
 
-    async fn event_handler(mut cm: Self, new_connections_tx: UnboundedSender<(Replica, Message)>, add_connection_rx: UnboundedReceiver<(Replica, String)>) {
+                let reader = peer.reader.unwrap();
+                let writer = peer.writer.unwrap();
+                // let mut buf: [u8; 0] = [0;0];
+                // println!("Checking for reset connection!");
+                // let a = reader.try_read(&mut buf);
+                // println!("{:?}", a);
+                // let b = writer.try_write(&buf);
+                // println!("{:?}", b);
+                // if [>a.is_err() ||<] b.is_err() {
+                    // println!("Connection broken, resetting");
+                    // println!("Connection broken, resetting");
+                    // println!("Connection broken, resetting");
+                    // println!("Connection broken, resetting");
+                    // println!("Connection broken, resetting");
+                    // println!("Connection broken, resetting");
+                    // cm.peers.insert(id, super::connection::Pending{reader: None, writer: None});
+                    // cm.add_connection.send((id, cm.known_peers.get(&id).unwrap().clone())).await.unwrap();
+                    // continue;
+                // }
+
+                let p = Peer::new(reader, writer, self.dec.clone(), self.enc.clone());
+                self.completed_connections.send((id, p.send, p.recv)).await.unwrap();
+            }
+        }
+    }
+
+    async fn event_handler(mut cm: Self, new_connections_tx: UnboundedSender<(Replica, Message)>, add_connection_rx: UnboundedReceiver<(Replica, String, u64)>) {
 
         let notify = Arc::new(Notify::new());
-        tokio::spawn(listen(cm.addr, new_connections_tx.clone()));
+        tokio::spawn(listen(cm.addr.clone(), new_connections_tx.clone()));
         tokio::spawn(connect(cm.id, new_connections_tx, add_connection_rx, notify.clone()));
         notify.notify_one();
 
         for (id, _) in &cm.peers {
-            cm.add_connection.send((*id, cm.known_peers.get(id).unwrap().clone())).await.unwrap();
+            cm.add_connection.send((*id, cm.known_peers.get(id).unwrap().clone(), 10)).await.unwrap();
         }
 
         loop {
@@ -120,6 +151,7 @@ where
                             } else {
                                 cm.peers.get_mut(&id).unwrap().reader = Some(r);
                             }
+                            cm.finalize_connection(id).await;
                         },
                         Message::Writer(w) => {
                             if !cm.peers.contains_key(&id) {
@@ -127,26 +159,21 @@ where
                             } else {
                                 cm.peers.get_mut(&id).unwrap().writer = Some(w);
                             }
+                            cm.finalize_connection(id).await;
                         },
-                    }
-                    // TODO Clean this up..?
-                    if let Some(_) = cm.peers.get(&id).unwrap().writer {
-                        if let Some(_) = cm.peers.get(&id).unwrap().reader {
-                            let peer = cm.peers.remove(&id).unwrap();
-                            let p = Peer::new(peer.reader.unwrap(), peer.writer.unwrap(), cm.dec.clone(), cm.enc.clone());
-                            cm.completed_connections.send((id, p.send, p.recv)).await.unwrap();
-                        }
+                        Message::Timeout(id) => {
+                            cm.peers.remove(&id);
+                        },
                     }
                 },
                 function_call = cm.function_calls.next() => {
                     let function = function_call.unwrap();
                     match function {
-                        // Function::AddConnection(id, addr) => {
-                        Function::AddConnection(id) => {
+                        Function::AddConnection(id, timeout) => {
                             if !cm.peers.contains_key(&id) {
                                 cm.peers.insert(id.clone(), super::connection::Pending{reader: None, writer: None});
                             }
-                            cm.add_connection.send((id, cm.known_peers.get(&id).unwrap().clone())).await.unwrap();
+                            cm.add_connection.send((id, cm.known_peers.get(&id).unwrap().clone(), timeout)).await.unwrap();
                             notify.notify_one();
                         },
                     }
@@ -170,6 +197,8 @@ async fn accept_conn(mut new_connections: UnboundedSender<(Replica, Message)>, m
     conn.set_nodelay(true).expect("Failed to set nodelay");
 
     // TODO Verify the connection is coming from valid node
+    // TODO Maybe we should build a handshake method..? Have nodes sign it to verify ident
+    //      This would also fix the rare problem of out of sync connections that can't reconnect
     let mut id_buf = [0 as u8; ID_BYTE_SIZE];
     conn.read_exact(&mut id_buf).await.expect("Failed to read ID from new connection");
     let id = Replica::from_be_bytes(id_buf);
@@ -178,7 +207,7 @@ async fn accept_conn(mut new_connections: UnboundedSender<(Replica, Message)>, m
     new_connections.send((id, Message::Reader(read))).await.unwrap();
 }
 
-async fn connect(my_id: Replica, mut new_connections: UnboundedSender<(Replica, Message)>, mut add_connection: UnboundedReceiver<(Replica, String)>, notify: Arc<Notify>) {
+async fn connect(my_id: Replica, mut new_connections: UnboundedSender<(Replica, Message)>, mut add_connection: UnboundedReceiver<(Replica, String, u64)>, notify: Arc<Notify>) {
 
     let mut interval = time::interval(Duration::from_millis(100));
 
@@ -191,20 +220,28 @@ async fn connect(my_id: Replica, mut new_connections: UnboundedSender<(Replica, 
                     interval.tick().await;
 
                     // TODO Look at this for iterator?
-                    let mut r = add_connection.try_next();
-                    while r.is_ok() {
-                        let (id, addr) = r.unwrap().unwrap();
-                        to_connect.insert(id, addr);
-                        r = add_connection.try_next();
+                    let mut read = add_connection.try_next();
+                    while read.is_ok() {
+                        let (id, addr, timeout) = read.unwrap().unwrap();
+                        to_connect.insert(id, (addr, Instant::now().checked_add(Duration::from_secs(timeout)).unwrap()));
+                        read = add_connection.try_next();
                     }
 
-                    let iter: Vec<(Replica, String)> = to_connect.iter().map(|(key, value)| (*key, value.clone())).collect();
+                    let iter: Vec<(Replica, String, Instant)> = to_connect.iter().map(|(key, value)| (*key, value.0.clone(), value.1)).collect();
 
                     if iter.len() <= 0 {
                         break;
                     }
 
-                    for (id, addr) in iter {
+                    for (id, addr, timeout) in iter {
+
+                        // TODO Instead of timeout, Why not try N times then quit after. Is there a
+                        // difference?
+                        if Instant::now() > timeout {
+                            log::info!("Connection to peer {} timed out", id);
+                            to_connect.remove(&id);
+                            new_connections.send((id, Message::Timeout(id))).await.unwrap();
+                        }
 
                         let mut write = match attempt_conn(addr).await {
                             Err(_) => continue,

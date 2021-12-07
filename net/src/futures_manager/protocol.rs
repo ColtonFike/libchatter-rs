@@ -127,6 +127,7 @@ O:WireReady + Clone + Sync + 'static + Unpin,
                 if let None = opt_in {
                     // log::error!(
                         // "Failed to read a protocol message from a peer");
+
                     // TODO this error occurs when no peers are connected
                     // How should that situation be handled?
                     continue;
@@ -166,7 +167,7 @@ O:WireReady + Clone + Sync + 'static + Unpin,
                         writers.remove(&id);
                         reading_net.remove(&id);
                         log::info!("Adding new disconnected node! {}", id.clone());
-                        function_caller.send(Function::AddConnection(id)).await.unwrap();
+                        function_caller.send(Function::AddConnection(id, 10)).await.unwrap();
                     }
                 }
             },
