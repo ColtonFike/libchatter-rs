@@ -111,6 +111,7 @@ async fn protocol_event_loop<I,O>(
 where I:WireReady + Send + Sync + 'static + Unpin,
 O:WireReady + Clone + Sync + 'static + Unpin, 
 {
+    let mut all_connected = false;
     loop {
         tokio::select!{
             new_connection = new_connections.next() => {
@@ -121,6 +122,7 @@ O:WireReady + Clone + Sync + 'static + Unpin,
                 let (id, writer, reader) = new_connection.unwrap();
                 writers.insert(id, writer);
                 reading_net.insert(id, reader);
+                all_connected = true;
                 log::info!("Successfully connected to peer {}", id);
             },
             opt_in = reading_net.next() => {
@@ -130,14 +132,26 @@ O:WireReady + Clone + Sync + 'static + Unpin,
 
                     // TODO this error occurs when no peers are connected
                     // How should that situation be handled?
-                    continue;
+                    if all_connected {
+                        // TODO reading_net.next returns none because streams are closed look into
+                        // this as souce of bug
+                        writers.clear();
+                        reading_net.clear();
+                        log::info!("All nodes disconnected!");
+                        function_caller.send(Function::AllDisconnected).await.unwrap();
+                        log::info!("Message sent!");
+                        all_connected = false;
+                    }
+                    // continue;
                     // std::process::exit(0);
-                }
-                let (id, msg) = opt_in.unwrap();
-                if let Err(e) = in_send.send((id, msg.init())).await {
-                    log::error!(
-                        "Failed to send a protocol message outside the network, with error {}", e);
-                    //std::process::exit(0);
+                } else {
+                    let (id, msg) = opt_in.unwrap();
+                    if let Err(e) = in_send.send((id, msg.init())).await {
+                        // TODO add disconnected nodes here as well
+                        log::error!(
+                            "Failed to send a protocol message outside the network, with error {}", e);
+                        //std::process::exit(0);
+                    }
                 }
             },
             opt_out = out_recv.next() => {
@@ -149,6 +163,7 @@ O:WireReady + Clone + Sync + 'static + Unpin,
                 let (to, msg) = opt_out.unwrap();
                 if to < num_nodes {
                     if let Err(_e) = writers[&to].clone().send(msg).await {
+                        // TODO add disconnected nodes here as well
                         log::error!("Failed to send msg to peer {}", to);
                         //std::process::exit(0);
                     }
@@ -166,7 +181,6 @@ O:WireReady + Clone + Sync + 'static + Unpin,
                     for id in disconnected {
                         writers.remove(&id);
                         reading_net.remove(&id);
-                        log::info!("Adding new disconnected node! {}", id.clone());
                         function_caller.send(Function::AddConnection(id, 10)).await.unwrap();
                     }
                 }

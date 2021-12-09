@@ -35,6 +35,7 @@ enum Message {
 #[derive(Debug)]
 pub enum Function {
     AddConnection(Replica, u64),
+    AllDisconnected,
 }
 
 pub struct ConnectionManager<I, O, D, E>
@@ -98,6 +99,8 @@ where
         function_caller
     }
     
+    // TODO Bug in this code. If one half of the connection has died, then we create a broken peer
+    // Attempted solution is commented out, but didn't work
     async fn finalize_connection(&mut self, id: Replica) {
         if let Some(_) = self.peers.get(&id).unwrap().writer {
             if let Some(_) = self.peers.get(&id).unwrap().reader {
@@ -105,6 +108,7 @@ where
 
                 let reader = peer.reader.unwrap();
                 let writer = peer.writer.unwrap();
+                
                 // let mut buf: [u8; 0] = [0;0];
                 // println!("Checking for reset connection!");
                 // let a = reader.try_read(&mut buf);
@@ -140,7 +144,9 @@ where
             cm.add_connection.send((*id, cm.known_peers.get(id).unwrap().clone(), 10)).await.unwrap();
         }
 
+        let mut interval = time::interval(Duration::from_millis(100));
         loop {
+            log::info!("Here!");
             tokio::select! {
                 half_connection = cm.new_connections.next() => {
                     let (id, connection) = half_connection.unwrap();
@@ -151,6 +157,7 @@ where
                             } else {
                                 cm.peers.get_mut(&id).unwrap().reader = Some(r);
                             }
+                            log::info!("Connection from peer {} in event loop", id);
                             cm.finalize_connection(id).await;
                         },
                         Message::Writer(w) => {
@@ -159,6 +166,7 @@ where
                             } else {
                                 cm.peers.get_mut(&id).unwrap().writer = Some(w);
                             }
+                            log::info!("Connected to peer {} in event loop", id);
                             cm.finalize_connection(id).await;
                         },
                         Message::Timeout(id) => {
@@ -170,16 +178,39 @@ where
                     let function = function_call.unwrap();
                     match function {
                         Function::AddConnection(id, timeout) => {
+                            log::info!("Adding new disconnected node! {}", id);
                             if !cm.peers.contains_key(&id) {
-                                cm.peers.insert(id.clone(), super::connection::Pending{reader: None, writer: None});
+                                cm.peers.insert(id, super::connection::Pending{reader: None, writer: None});
                             }
                             cm.add_connection.send((id, cm.known_peers.get(&id).unwrap().clone(), timeout)).await.unwrap();
                             notify.notify_one();
                         },
+                        Function::AllDisconnected => {
+                            log::info!("All nodes disconnected!");
+                            let iter: Vec<&Replica> = cm.known_peers.iter().filter_map(|(key, _)| {
+                                if let None = cm.peers.get(&key) {
+                                    Some(key)
+                                } else {
+                                    None
+                                }
+                            }).collect();
+
+                            log::info!("Iter size: {}", iter.len());
+
+                            for id in iter {
+                                cm.peers.insert(*id, super::connection::Pending{reader: None, writer: None});
+                                cm.add_connection.send((*id, cm.known_peers.get(id).unwrap().clone(), 10)).await.unwrap();
+                                notify.notify_one();
+                            }
+                        },
                     }
                 },
+                _ = interval.tick() => {
+                    log::info!("Interval ticked, we are stil running");
+                }
             };
         } 
+        log::info!("Loop ended!!");
     }
 }
 
@@ -204,6 +235,7 @@ async fn accept_conn(mut new_connections: UnboundedSender<(Replica, Message)>, m
     let id = Replica::from_be_bytes(id_buf);
 
     let (read, _) = conn.into_split();
+    log::info!("Connection from peer {} in accept_conn", id);
     new_connections.send((id, Message::Reader(read))).await.unwrap();
 }
 
@@ -248,9 +280,10 @@ async fn connect(my_id: Replica, mut new_connections: UnboundedSender<(Replica, 
                             Ok(w) => w,
                         };
 
-                        log::info!("Connected to peer {}", id);
+                        // TODO Prove identity of self when connecting
                         write.write_all(&my_id.to_be_bytes()).await.expect("Failed to send identification to node");
                         to_connect.remove(&id);
+                        log::info!("Connected to peer {} in connect", id);
                         new_connections.send((id, Message::Writer(write))).await.unwrap();
                     }
                 }
